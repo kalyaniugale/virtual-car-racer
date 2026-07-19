@@ -14,12 +14,15 @@ import Cockpit from "../cockpit/Cockpit";
 
 import HandTracker from "../mediapipe/HandTracker";
 import SteeringCalculator from "../mediapipe/SteeringCalculator";
+import TrafficManager from "../traffic/TrafficManager";
+import CollisionManager from "../traffic/CollisionManager";
 
 const GAME_STATE = Object.freeze({
     WAITING: "WAITING",
     COUNTDOWN: "COUNTDOWN",
     PLAYING: "PLAYING",
     PAUSED: "PAUSED",
+    CRASHED: "CRASHED",
     FINISHED: "FINISHED"
 });
 
@@ -35,9 +38,10 @@ export default class Game {
         this.camera = null;
         this.renderer = null;
         this.lights = null;
-
+        this.crashTimeout = null;
+        this.lastCollision = null;
         this.world = null;
-
+        
         this.inputManager = null;
         this.vehicleState = null;
         this.vehicleController = null;
@@ -138,7 +142,10 @@ export default class Game {
         this.initializeEvents();
 
         this.initializeOverlay();
-
+       this.collisionManager =
+    new CollisionManager(
+        this.vehicleState
+    );
         this.steeringCalculator =
             new SteeringCalculator();
 
@@ -191,6 +198,17 @@ export default class Game {
             new World(
                 this.threeScene
             );
+
+        const roadCurve =
+    this.world.getRoadCurve();
+
+this.trafficManager =
+    new TrafficManager(
+        this.threeScene,
+        roadCurve
+    );
+
+this.trafficManager.initialize();
 
     }
 
@@ -372,6 +390,12 @@ export default class Game {
 
                 break;
 
+            case GAME_STATE.CRASHED:
+
+                this.updateCrashed();
+
+                break;
+
             case GAME_STATE.FINISHED:
 
                 this.updateFinished();
@@ -404,7 +428,40 @@ export default class Game {
         //---------------------------------
         // FPS and HUD
         //---------------------------------
+       if (this.trafficManager) {
 
+    this.trafficManager.update(
+        safeDeltaTime
+    );
+
+    /*
+     * Collision should only affect the race while
+     * the player is actively driving.
+     */
+    if (
+        this.gameState ===
+        GAME_STATE.PLAYING
+    ) {
+
+        const collision =
+            this.collisionManager.checkCollision(
+                this.trafficManager.getVehicles()
+            );
+
+        if (
+            collision &&
+            collision.shouldEndRace
+        ) {
+
+            this.onCrash(
+                collision
+            );
+
+        }
+
+    }
+
+}
         this.updateFPS(
             safeDeltaTime
         );
@@ -421,6 +478,59 @@ export default class Game {
         );
 
     }
+    
+     
+    onCrash(collision) {
+
+    if (
+        this.gameState !==
+        GAME_STATE.PLAYING
+    ) {
+
+        return;
+
+    }
+
+    this.lastCollision =
+        collision;
+
+    console.log(
+        "Crash detected:",
+        collision.type,
+        collision
+    );
+
+    this.vehicleController.setAutoThrottle(
+        false
+    );
+
+    this.vehicleController.physics.stopImmediately();
+
+    this.vehicleState.engineRunning =
+        false;
+
+    this.setGameState(
+        GAME_STATE.CRASHED
+    );
+
+    if (this.crashTimeout) {
+
+        clearTimeout(
+            this.crashTimeout
+        );
+
+    }
+
+    this.crashTimeout =
+        window.setTimeout(() => {
+
+            this.crashTimeout = null;
+
+            this.finishRace();
+
+        }, 2000);
+
+}
 
     updateHandTracking() {
 
@@ -551,6 +661,17 @@ export default class Game {
         );
 
     }
+
+    updateCrashed() {
+
+    this.stopVehicle();
+
+    this.world.update(
+        0,
+        this.vehicleState
+    );
+
+}
 
     updateStableGesture(detectedGesture) {
 
@@ -934,7 +1055,7 @@ export default class Game {
 
     this.vehicleController.setAutoThrottle(false);
 
-    this.stopVehicle();
+    this.vehicleController.physics.stopImmediately();
 
     this.lastGestureActionTime =
         performance.now();
@@ -942,7 +1063,6 @@ export default class Game {
     this.setGameState(
         GAME_STATE.FINISHED
     );
-
 }
 
     restartRace() {
@@ -985,7 +1105,24 @@ export default class Game {
 
         this.vehicleState.heading =
             this.startHeading;
+        this.vehicleState.engineRunning = true;
+        this.lastCollision = null;
 
+if (this.crashTimeout) {
+
+    clearTimeout(
+        this.crashTimeout
+    );
+
+    this.crashTimeout = null;
+
+}
+
+if (this.collisionManager) {
+
+    this.collisionManager.reset();
+
+}
         //---------------------------------
         // Reset common speed properties
         //---------------------------------
@@ -1211,6 +1348,21 @@ export default class Game {
 
                 this.messageElement.style.display =
                     "flex";
+
+                break;
+             
+            case GAME_STATE.CRASHED:
+
+                 this.messageElement.innerHTML = `
+                    <strong>💥 Collision!</strong>
+                   <span>
+                 ${this.getCollisionMessage()}
+                </span>
+                 <span>Race ending...</span>
+                `;
+
+               this.messageElement.style.display =
+               "flex";
 
                 break;
 
@@ -1637,6 +1789,33 @@ export default class Game {
 
     }
 
+    getCollisionMessage() {
+
+    const collisionType =
+        this.lastCollision?.type;
+
+    switch (collisionType) {
+
+        case "FRONT_COLLISION":
+
+            return "You collided with the vehicle ahead.";
+
+        case "SIDE_COLLISION":
+
+            return "A side collision occurred.";
+
+        case "PLAYER_REAR_COLLISION":
+
+            return "You reversed into another vehicle.";
+
+        default:
+
+            return "A vehicle collision occurred.";
+
+    }
+
+}
+
     updateHUD() {
 
         if (!this.overlay) {
@@ -1996,6 +2175,16 @@ export default class Game {
     }
 
     destroy() {
+
+        if (this.crashTimeout) {
+
+            clearTimeout(
+            this.crashTimeout
+             );
+
+           this.crashTimeout = null;
+
+          }
 
         window.removeEventListener(
             "resize",

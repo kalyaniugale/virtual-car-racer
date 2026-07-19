@@ -53,6 +53,13 @@ export default class World {
             this.road
         );
     }
+    getRoadCurve() {
+    return this.road.getCurve();
+}
+
+getRoad() {
+    return this.road;
+}
 
     update(deltaTime, vehicleState) {
 
